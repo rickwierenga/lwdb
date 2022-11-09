@@ -1,2 +1,4 @@
 db_password.txt
 secret_key.txt
+password_salt.txt
+sendgrid_api_key.txt

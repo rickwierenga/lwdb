@@ -7,8 +7,6 @@ from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID
 
-from db import Session
-
 
 B = declarative_base()
 
@@ -27,6 +25,8 @@ class Base(B):
       "updated_on": self.updated_on.isoformat(),
     }
 
+from .db import Session # prevent circular import, need to find a better way
+
 Base.query = Session.query_property()
 
 
@@ -35,6 +35,7 @@ class User(Base):
 
   password_hash = Column(String(120), nullable=False)
   email = Column(String(80), unique=True, nullable=False, index=True)
+  email_verified_at = Column(DateTime, nullable=True)
 
   def serialize(self):
     return {

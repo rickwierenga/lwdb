@@ -36,28 +36,6 @@
             >
               Account: {{ current_user.email }}
             </a>
-            <ul class="dropdown-menu">
-              <li>Current user: {{ current_user.email }}</li>
-              <li>
-                Session:
-                <span id="session-id">{{ session.id }}</span>
-              </li>
-            </ul>
-          </li>
-          {% endif %} {% if current_user.can_demo %}
-          <li class="nav-item" id="update-available" style="display: none">
-            <button
-              class="btn btn-danger me-2"
-              onclick="sendUpdateRequest(event)"
-            >
-              <div
-                class="loader"
-                id="update-loader"
-                style="display: none"
-              ></div>
-
-              Update and restart simulator
-            </button>
           </li>
           {% endif %}
 
@@ -81,7 +59,7 @@
 
           <li class="nav-item">
             <a
-              href="mailto:wierenga@media.mit.edu?subject=PyLabRobot%20Platform%20Feedback&body=session%20id%20{{ current_user.id }}"
+              href="mailto:wierenga@media.mit.edu?subject=LWDb%20Feedback&body=session%20id%20{{ current_user.id }}"
               class="btn btn-sm btn-secondary"
               >Support</a
             >

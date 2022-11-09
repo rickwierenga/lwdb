@@ -17,10 +17,21 @@ services:
     secrets:
       - db_password
 
+  redis:
+    platform: linux/amd64
+    image: "redis:alpine"
+    networks:
+      - web
+    expose:
+      - 6379
+    volumes:
+      - cache:/data
+
   web:
     build: .
     depends_on:
       - db
+      - redis
     expose:
       - "5001"
     networks:
@@ -34,11 +45,15 @@ services:
     environment:
       VIRTUAL_HOST: "localhost"
 
+      REDIS_HOST: "redis"
+
       DB_USER: "postgres"
       DB_HOST: "db"
       DB_NAME: "db"
       DB_PASSWORD_FILE: /run/secrets/db_password
       SECRET_KEY_FILE: /run/secrets/secret_key
+      PASSWORD_SALT_FILE: /run/secrets/password_salt
+      SENDGRID_API_KEY_FILE: /run/secrets/sendgrid_api_key
 
       PYTHONUNBUFFERED: 1
 
@@ -46,6 +61,30 @@ services:
     secrets:
       - db_password
       - secret_key
+      - password_salt
+      - sendgrid_api_key
+
+  worker:
+    build:
+      context: ./
+      dockerfile: ./worker/Dockerfile
+    depends_on:
+      - redis
+    deploy:
+      mode: replicated
+      replicas: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - web
+    environment:
+      REDIS_HOST: "redis"
+
+      SENDGRID_API_KEY_FILE: /run/secrets/sendgrid_api_key
+
+      PYTHONUNBUFFERED: 1
+    secrets:
+      - sendgrid_api_key
 
   nginx:
     platform: linux/amd64
@@ -70,9 +109,15 @@ secrets:
     file: db_password.txt
   secret_key:
     file: secret_key.txt
+  password_salt:
+    file: password_salt.txt
+  sendgrid_api_key:
+    file: sendgrid_api_key.txt
 
 volumes:
   db:
     driver: local
   files:
+    driver: local
+  cache:
     driver: local

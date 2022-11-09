@@ -1,6 +1,9 @@
+import datetime
+import functools
 import http
 import json
 import os
+import textwrap
 import uuid
 
 from flask import Blueprint, jsonify, current_app, Flask, request, redirect, url_for, flash, render_template
@@ -8,11 +11,18 @@ from flask_bcrypt import Bcrypt
 from flask_login import login_required, current_user, login_user, LoginManager
 from flask_bcrypt import check_password_hash, generate_password_hash
 from flask_wtf import FlaskForm
+import itsdangerous
+import sendgrid
 from wtforms import StringField
 from wtforms.validators import DataRequired, Email, Length, ValidationError
 
-import db
-from models import LabwareDefinition, DefaultVersion, User
+import redis
+from rq import Queue
+
+import server.db
+from server.models import LabwareDefinition, DefaultVersion, User
+
+from worker.tasks import send_email
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 if "SECRET_KEY" in os.environ:
@@ -25,23 +35,56 @@ else:
 app.config["LABWARE_DIR"] = os.environ.get("LABWARE_DIR", "labware")
 os.makedirs(app.config["LABWARE_DIR"], exist_ok=True)
 
-dbs = db.get_session()
+if "PASSWORD_SALT" in os.environ:
+  app.config["PASSWORD_SALT"] = os.environ["PASSWORD_SALT"]
+elif "PASSWORD_SALT_FILE" in os.environ:
+  with open(os.environ["PASSWORD_SALT_FILE"], encoding="utf-8") as psf:
+    app.config["PASSWORD_SALT"] = psf.read()
+else:
+  raise Exception("No password salt specified")
+
+dbs = server.db.get_session()
+
+redis_host = os.environ.get("REDIS_HOST", "localhost")
+redis_pool = redis.ConnectionPool(host=redis_host, port=6379, db=0, decode_responses=True)
+redis_client = redis.StrictRedis(connection_pool=redis_pool)
+q = Queue(connection=redis_client)
 
 bcrypt = Bcrypt(app)
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
 
+if "SENDGRID_API_KEY" in os.environ:
+  sg_api_key = os.environ["SENDGRID_API_KEY"]
+elif "SENDGRID_API_KEY_FILE" in os.environ:
+  with open(os.environ["SENDGRID_API_KEY_FILE"], encoding="utf-8") as sgf:
+    sg_api_key = sgf.read().strip()
+else:
+  raise Exception("No sendgrid api key specified")
+sg = sendgrid.SendGridAPIClient(api_key=sg_api_key)
+
 @login_manager.user_loader
 def load_user(user_id):
   return User.query.get(user_id)
+
+# TODO: user checker should also check for email verification.
 
 @login_manager.unauthorized_handler
 def unauthorized():
   if request.headers.get("Accept") == "application/json":
     return jsonify({"error": "Unauthorized"}), http.HTTPStatus.UNAUTHORIZED
-  return redirect(url_for('login'))
+  return redirect(url_for("login"))
 
+def email_verification_required(f):
+  @functools.wraps(f)
+  def decorated_function(*args, **kwargs):
+    if not current_user.is_authenticated:
+      return login_manager.unauthorized()
+    if current_user.email_verified_at is None:
+      return redirect(url_for("email_not_verified"))
+    return f(*args, **kwargs)
+  return decorated_function
 
 @app.route("/")
 def index():
@@ -81,6 +124,7 @@ def get_all():
 
 @api.route("/labware", methods=["POST"])
 @login_required
+@email_verification_required
 def create():
   data = request.get_json()
 
@@ -174,6 +218,35 @@ class SignUpForm(FlaskForm):
       raise ValidationError("Email already in use")
 
 
+def generate_confirmation_token(email):
+  serializer = itsdangerous.URLSafeTimedSerializer(app.config["SECRET_KEY"])
+  return serializer.dumps(email, salt=app.config["PASSWORD_SALT"])
+
+@app.route("/send")
+def send():
+  user = User.query.first()
+  send_verification_email(user)
+  return "ok"
+
+def send_verification_email(user):
+  token = generate_confirmation_token(user.email)
+  print(token)
+  link = url_for("verify_email", token=token, _external=True)
+  subject = "Please verify your email"
+
+  text = textwrap.dedent(f"""
+    Hi,
+
+    Please click the following link to verify your email address: {link} .
+
+    This link will expire in 24 hours.
+
+    -LWDb
+    """)
+
+  q.enqueue_call(send_email, args=(user.email, subject, text))
+
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
   form = SignUpForm()
@@ -198,9 +271,55 @@ def register():
 
     login_user(user, remember=True)
 
+    send_verification_email(user)
+
     return "OK"
   else:
     print(form.errors)
     # will be rendered by the template
 
   return render_template("signup.html", form=form)
+
+
+@app.route("/email-verification-needed")
+@login_required
+def email_not_verified():
+  if request.headers.get("Accept") == "application/json":
+    link = url_for("resend_verification_email", _external=True)
+    return jsonify({"error": f"Email not verified. See {link}"}), 403
+  return render_template("email_verification_needed.html")
+
+
+@app.route("/resend-verification-email")
+@login_required
+def resend_verification_email():
+  if current_user.email_verified_at is not None:
+    return "Email already verified"
+  send_verification_email(current_user)
+  return f"Sent verification email to {current_user.email}"
+
+
+@app.route("/verify/<token>")
+def verify_email(token):
+  serializer = itsdangerous.URLSafeTimedSerializer(app.config["SECRET_KEY"])
+  try:
+    email = serializer.loads(
+      token,
+      salt=app.config["PASSWORD_SALT"],
+      max_age=60 * 60 * 24)
+    user = User.query.filter_by(email=email).first()
+    if user is not None:
+      if user.email_verified_at is not None:
+        return "Email already verified"
+
+      user.email_verified_at = datetime.datetime.now()
+      try:
+        dbs.commit()
+      except Exception as e:
+        dbs.rollback()
+        current_app.logger.error(e)
+        return "Could not verify email, try again later.", 500
+      return "Email is now verified"
+  except Exception as e:
+    current_app.logger.error(e)
+    return "Could not verify email, try again later.", 500

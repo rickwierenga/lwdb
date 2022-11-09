@@ -25,6 +25,6 @@ Session = scoped_session(sessionmaker(autocommit=False, bind=engine))
 def get_session():
   return Session
 
-import models
+from server.models import Base
 
-models.Base.metadata.create_all(engine)
+Base.metadata.create_all(engine)

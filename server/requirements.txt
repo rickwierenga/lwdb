@@ -3,4 +3,7 @@ flask
 flask-bcrypt
 flask-login
 flask-wtf
+sendgrid
 sqlalchemy
+redis
+rq
